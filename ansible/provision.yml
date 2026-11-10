@@ -1,0 +1,167 @@
+---
+# Развёртывает TUN, TAP и RAS. Сначала провижинится сервер, затем клиент.
+- name: Развернуть лабораторию OpenVPN
+  hosts: all
+  become: true
+  vars:
+    vpn_local_state: "{{ playbook_dir }}/../.vagrant"
+    vpn_benchmarks:
+      - {mode: tun, port: 1195}
+      - {mode: tap, port: 1196}
+  tasks:
+    - name: Проверить наличие локального ключа для клиентской ВМ
+      ansible.builtin.stat:
+        path: "{{ vpn_local_state }}/vpn-benchmark.key"
+      register: vpn_local_benchmark
+      delegate_to: localhost
+      become: false
+      when: not (vpn_server | bool)
+
+    - name: Проверить порядок запуска
+      ansible.builtin.assert:
+        that: vpn_local_benchmark.stat.exists
+        fail_msg: Сначала запусти или перепровижинь vpnServer.
+      when: not (vpn_server | bool)
+
+    - name: Создать каталог настройки DNS
+      ansible.builtin.file:
+        path: /etc/systemd/resolved.conf.d
+        state: directory
+        mode: '0755'
+
+    - name: Использовать DNS VirtualBox для установки пакетов
+      ansible.builtin.copy:
+        dest: /etc/systemd/resolved.conf.d/99-otus-vpn-dns.conf
+        mode: '0644'
+        content: |
+          [Resolve]
+          DNS=10.0.2.3
+          Domains=~.
+          DNSSEC=no
+      register: vpn_dns
+
+    - name: Применить настройку DNS
+      ansible.builtin.systemd:
+        name: systemd-resolved
+        state: restarted
+      when: vpn_dns.changed
+
+    - name: Установить OpenVPN и iperf3
+      ansible.builtin.apt:
+        name: "{{ ['openvpn', 'iperf3', 'easy-rsa'] if vpn_server else ['openvpn', 'iperf3'] }}"
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Создать каталог конфигурации OpenVPN
+      ansible.builtin.file:
+        path: /etc/openvpn/otus
+        state: directory
+        mode: '0700'
+
+    - name: Создать и передать общий ключ для замеров
+      when: vpn_server | bool
+      no_log: true
+      block:
+        - name: Сгенерировать ключ на сервере
+          ansible.builtin.command: openvpn --genkey --secret /etc/openvpn/otus/bench.key
+          args:
+            creates: /etc/openvpn/otus/bench.key
+
+        - name: Прочитать ключ для передачи клиентской ВМ
+          ansible.builtin.slurp:
+            src: /etc/openvpn/otus/bench.key
+          register: vpn_benchmark_key
+
+        - name: Сохранить ключ в локальном состоянии Vagrant
+          ansible.builtin.copy:
+            content: "{{ vpn_benchmark_key.content | b64decode }}"
+            dest: "{{ vpn_local_state }}/vpn-benchmark.key"
+            mode: '0600'
+          delegate_to: localhost
+          become: false
+
+    - name: Установить общий ключ на клиенте
+      ansible.builtin.copy:
+        src: "{{ vpn_local_state }}/vpn-benchmark.key"
+        dest: /etc/openvpn/otus/bench.key
+        mode: '0600'
+      no_log: true
+      when: not (vpn_server | bool)
+
+    - name: Настроить туннели TUN и TAP
+      ansible.builtin.template:
+        src: benchmark.conf.j2
+        dest: "/etc/openvpn/otus/{{ item.mode }}.conf"
+        mode: '0600'
+      loop: "{{ vpn_benchmarks }}"
+
+    - name: Установить службу OpenVPN
+      ansible.builtin.copy:
+        src: otus-openvpn@.service
+        dest: /etc/systemd/system/otus-openvpn@.service
+        mode: '0644'
+
+    - name: Запустить оба туннеля
+      ansible.builtin.systemd:
+        name: "otus-openvpn@{{ item.mode }}.service"
+        daemon_reload: true
+        enabled: true
+        state: restarted
+      loop: "{{ vpn_benchmarks }}"
+
+    - name: Настроить сервер измерений и RAS
+      when: vpn_server | bool
+      block:
+        - name: Установить службу iperf3
+          ansible.builtin.copy:
+            src: otus-iperf.service
+            dest: /etc/systemd/system/otus-iperf.service
+            mode: '0644'
+
+        - name: Запустить iperf3
+          ansible.builtin.systemd:
+            name: otus-iperf.service
+            daemon_reload: true
+            enabled: true
+            state: started
+
+        - name: Создать PKI на сервере
+          ansible.builtin.script: create-ras-pki_v1.sh
+          no_log: true
+
+        - name: Сохранить конфигурацию RAS
+          ansible.builtin.template:
+            src: ras.conf.j2
+            dest: /etc/openvpn/otus/ras.conf
+            mode: '0600'
+
+        - name: Запустить RAS
+          ansible.builtin.systemd:
+            name: otus-openvpn@ras.service
+            enabled: true
+            state: restarted
+
+        - name: Прочитать только сертификаты и ключи, нужные клиенту
+          ansible.builtin.slurp:
+            src: "/etc/openvpn/otus/{{ item }}"
+          loop:
+            - pki/ca.crt
+            - pki/issued/ras-client.crt
+            - pki/private/ras-client.key
+            - ras-tls.key
+          register: vpn_ras_credentials
+          no_log: true
+
+        - name: Сохранить клиентский профиль на хосте
+          ansible.builtin.template:
+            src: ras-client.ovpn.j2
+            dest: "{{ vpn_local_state }}/vpn-ras.ovpn"
+            mode: '0600'
+          delegate_to: localhost
+          become: false
+          no_log: true
+
+# Версия 1 | 2026-11-09 | TUN, TAP, iperf3, PKI и профиль RAS.

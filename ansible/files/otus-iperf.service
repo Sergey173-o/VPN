@@ -1,0 +1,13 @@
+# Запускает сервер измерений. Клиенты обращаются к адресам туннелей.
+[Unit]
+Description=OTUS iperf3 server
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/iperf3 -s
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+
+# Версия 1 | 2026-11-09 | Служба iperf3 для замеров.

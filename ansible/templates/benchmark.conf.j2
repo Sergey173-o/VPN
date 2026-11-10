@@ -1,0 +1,23 @@
+# Одинаковый профиль шифрования и MTU для обоих режимов.
+dev {{ item.mode }}bench
+dev-type {{ item.mode }}
+proto udp4
+local {{ vpn_underlay_local }}
+remote {{ vpn_underlay_peer }} {{ item.port }}
+lport {{ item.port }}
+secret /etc/openvpn/otus/bench.key
+cipher AES-256-CBC
+auth SHA256
+tun-mtu 1400
+{% if item.mode == 'tun' %}
+ifconfig {{ '10.77.1.1 10.77.1.2' if vpn_server else '10.77.1.2 10.77.1.1' }}
+{% else %}
+ifconfig {{ '10.77.2.1' if vpn_server else '10.77.2.2' }} 255.255.255.0
+{% endif %}
+ping 10
+ping-restart 60
+persist-key
+persist-tun
+verb 3
+
+# Версия 1 | 2026-11-09 | Общий профиль TUN и TAP для iperf3.

@@ -1,0 +1,23 @@
+# Профиль удалённого доступа. Содержит приватный ключ клиента.
+client
+dev tun
+proto udp4
+remote {{ vpn_ras_remote }} 11940
+nobind
+remote-cert-tls server
+verify-x509-name ras-server name
+tls-version-min 1.2
+verb 3
+<ca>
+{{ vpn_ras_credentials.results[0].content | b64decode | trim }}
+</ca>
+<cert>
+-----BEGIN CERTIFICATE-----{{ (vpn_ras_credentials.results[1].content | b64decode).split('-----BEGIN CERTIFICATE-----')[-1].split('-----END CERTIFICATE-----')[0] }}-----END CERTIFICATE-----
+</cert>
+<key>
+{{ vpn_ras_credentials.results[2].content | b64decode | trim }}
+</key>
+<tls-crypt>
+{{ vpn_ras_credentials.results[3].content | b64decode | trim }}
+</tls-crypt>
+# Версия 1 | 2026-11-09 | Самодостаточный профиль клиента с TLS.
